@@ -1,0 +1,18 @@
+repositories {
+    google()
+    mavenCentral()
+}
+
+configurations {
+    testConf
+}
+
+dependencies {
+    testConf 'com.capacitorjs:android:8.5.0'
+}
+
+task testResolve {
+    doLast {
+        configurations.testConf.each { println it }
+    }
+}

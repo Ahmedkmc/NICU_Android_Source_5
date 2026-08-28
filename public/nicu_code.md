@@ -1,0 +1,561 @@
+# NICU Dosing Engine Source Code
+
+Please create the following files in the workspace exactly as provided below to restore the application.
+
+## package.json
+```json
+{
+  "name": "react-example",
+  "private": true,
+  "version": "0.0.0",
+  "type": "module",
+  "scripts": {
+    "dev": "vite --port=3000 --host=0.0.0.0",
+    "build": "vite build",
+    "preview": "vite preview",
+    "clean": "rm -rf dist server.js",
+    "lint": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@capacitor/core": "^8.5.0",
+    "@google/genai": "^2.4.0",
+    "@tailwindcss/vite": "^4.1.14",
+    "@vitejs/plugin-react": "^5.0.4",
+    "adm-zip": "^0.6.0",
+    "dotenv": "^17.2.3",
+    "express": "^4.21.2",
+    "lucide-react": "^0.546.0",
+    "motion": "^12.23.24",
+    "react": "^19.0.1",
+    "react-dom": "^19.0.1",
+    "vite": "^6.2.3"
+  },
+  "devDependencies": {
+    "@capacitor/android": "^8.5.0",
+    "@capacitor/cli": "^8.5.0",
+    "@types/express": "^4.17.21",
+    "@types/node": "^22.14.0",
+    "autoprefixer": "^10.4.21",
+    "esbuild": "^0.25.0",
+    "tailwindcss": "^4.1.14",
+    "tsx": "^4.21.0",
+    "typescript": "~5.8.2",
+    "vite": "^6.2.3",
+    "vite-plugin-pwa": "^1.3.0"
+  }
+}
+
+```
+
+## vite.config.ts
+```typescript
+import tailwindcss from '@tailwindcss/vite';
+import react from '@vitejs/plugin-react';
+import path from 'path';
+import {defineConfig} from 'vite';
+import { VitePWA } from 'vite-plugin-pwa';
+
+export default defineConfig(() => {
+  return {
+    plugins: [
+      react(), 
+      tailwindcss(),
+      VitePWA({
+        registerType: 'autoUpdate',
+        devOptions: {
+          enabled: true
+        },
+        manifest: {
+          name: 'NICU Protocol',
+          short_name: 'NICU Protocol',
+          theme_color: '#075985', // sky-800
+          background_color: '#f8fafc', // slate-50
+          display: 'standalone',
+          scope: '/',
+          start_url: '/',
+          description: 'Offline-first Neonatal dosing calculator'
+        },
+        workbox: {
+          globPatterns: ['**/*.{js,css,html,ico,png,svg}']
+        }
+      })
+    ],
+    resolve: {
+      alias: {
+        '@': path.resolve(__dirname, '.'),
+      },
+    },
+    server: {
+      // HMR is disabled in AI Studio via DISABLE_HMR env var.
+      // Do not modifyâfile watching is disabled to prevent flickering during agent edits.
+      hmr: process.env.DISABLE_HMR !== 'true',
+      // Disable file watching when DISABLE_HMR is true to save CPU during agent edits.
+      watch: process.env.DISABLE_HMR === 'true' ? null : {},
+    },
+  };
+});
+
+```
+
+## src/App.tsx
+```tsx
+import React, { useState, useEffect } from 'react';
+import { calculateNICUDosing, CalculationOutput, DRUG_REGISTRY } from './engine/dosing_engine';
+import { Activity, FileText, AlertTriangle, Info, AlertCircle, Search, Baby, Droplets, Syringe } from 'lucide-react';
+
+// Robust local storage hook for persistence
+function useLocalStorage<T>(key: string, initialValue: T) {
+  const [storedValue, setStoredValue] = useState<T>(() => {
+    try {
+      const item = window.localStorage.getItem(key);
+      return item ? JSON.parse(item) : initialValue;
+    } catch (error) {
+      console.warn("localStorage error", error);
+      return initialValue;
+    }
+  });
+
+  const setValue = (value: T | ((val: T) => T)) => {
+    try {
+      const valueToStore = value instanceof Function ? value(storedValue) : value;
+      setStoredValue(valueToStore);
+      window.localStorage.setItem(key, JSON.stringify(valueToStore));
+    } catch (error) {
+      console.warn("localStorage error", error);
+    }
+  };
+
+  return [storedValue, setValue] as const;
+}
+
+function DrugSearchBox({ value, onChange, registry }: { value: string, onChange: (id: string) => void, registry: typeof DRUG_REGISTRY }) {
+  const [search, setSearch] = useState('');
+  const [isOpen, setIsOpen] = useState(false);
+  const wrapperRef = React.useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    const drug = registry.find(d => d.id === value);
+    if (drug && !isOpen) {
+      setSearch(drug.name);
+    }
+  }, [value, registry, isOpen]);
+
+  useEffect(() => {
+    function handleClickOutside(event: MouseEvent) {
+      if (wrapperRef.current && !wrapperRef.current.contains(event.target as Node)) {
+        setIsOpen(false);
+        const drug = registry.find(d => d.id === value);
+        if (drug) setSearch(drug.name);
+      }
+    }
+    document.addEventListener("mousedown", handleClickOutside);
+    return () => document.removeEventListener("mousedown", handleClickOutside);
+  }, [value, registry]);
+
+  const filtered = registry.filter(d => d.name.toLowerCase().includes(search.toLowerCase()));
+
+  return (
+    <div ref={wrapperRef} className="relative w-full">
+      <div className="relative">
+        <input 
+          type="text"
+          value={search}
+          onChange={(e) => {
+            setSearch(e.target.value);
+            setIsOpen(true);
+          }}
+          onFocus={() => setIsOpen(true)}
+          placeholder="Search drug..."
+          className="w-full border border-slate-300 rounded px-3 py-2 pr-8 font-mono text-sm bg-white text-sky-900 focus:outline-none focus:border-sky-500 focus:ring-1 focus:ring-sky-500"
+        />
+        <Search className="w-4 h-4 text-slate-400 absolute right-3 top-2.5 pointer-events-none" />
+      </div>
+      
+      {isOpen && (
+        <ul className="absolute z-50 w-full mt-1 bg-white border border-slate-300 rounded-md shadow-lg max-h-60 overflow-y-auto">
+          {filtered.length > 0 ? filtered.map(drug => (
+            <li 
+              key={drug.id}
+              className="px-3 py-2 text-sm font-mono text-slate-700 hover:bg-sky-50 cursor-pointer border-b last:border-b-0 border-slate-100"
+              onClick={() => {
+                onChange(drug.id);
+                setSearch(drug.name);
+                setIsOpen(false);
+              }}
+            >
+              {drug.name}
+            </li>
+          )) : (
+            <li className="px-3 py-2 text-sm font-mono text-slate-400 italic">No drugs found</li>
+          )}
+        </ul>
+      )}
+    </div>
+  );
+}
+
+export default function App() {
+  const [birthWeightStr, setBirthWeightStr] = useLocalStorage<string>('nicu_birthWeight_v2', '2.5');
+  const [currentWeightStr, setCurrentWeightStr] = useLocalStorage<string>('nicu_currentWeight_v2', '2.5');
+  const [gestationalAgeStr, setGestationalAgeStr] = useLocalStorage<string>('nicu_gestationalAge_v2', '36');
+  const [dayOfLifeStr, setDayOfLifeStr] = useLocalStorage<string>('nicu_dayOfLife', '3');
+  const [activeTab, setActiveTab] = useState<'vitals' | 'fluids' | 'drugs'>('vitals');
+
+  
+  const [isAsphyxia, setIsAsphyxia] = useLocalStorage<boolean>('nicu_isAsphyxia', false);
+  const [isPhototherapy, setIsPhototherapy] = useLocalStorage<boolean>('nicu_isPhototherapy', false);
+  const [isRadiantWarmer, setIsRadiantWarmer] = useLocalStorage<boolean>('nicu_isRadiantWarmer', false);
+  
+  const [drugName, setDrugName] = useLocalStorage<string>('nicu_drugName', 'gentamicin');
+
+  const [output, setOutput] = useState<CalculationOutput | null>(null);
+  const [inputWarnings, setInputWarnings] = useState<string[]>([]);
+
+  // Safe parsing functions that handle empty strings and commas
+  const parseSafeFloat = (str: string) => {
+    const parsed = parseFloat(str.replace(',', '.'));
+    return isNaN(parsed) ? 0 : parsed;
+  };
+  const parseSafeInt = (str: string) => {
+    const parsed = parseInt(str.replace(',', '.'), 10);
+    return isNaN(parsed) ? 0 : parsed;
+  };
+
+  const birthWeight = parseSafeFloat(birthWeightStr);
+  const currentWeight = parseSafeFloat(currentWeightStr);
+  const gestationalAge = parseSafeInt(gestationalAgeStr);
+  const dayOfLife = parseSafeInt(dayOfLifeStr);
+
+  useEffect(() => {
+    // 1. Calculate Input Sanity Warnings
+    const warnings: string[] = [];
+    if (currentWeight < 0.3 || currentWeight > 10) {
+      warnings.push("CRITICAL: Current weight is outside normal neonatal physiological bounds (0.3kg - 10kg).");
+    }
+    if (birthWeight < 0.3 || birthWeight > 10) {
+      warnings.push("CRITICAL: Birth weight is outside normal neonatal physiological bounds (0.3kg - 10kg).");
+    }
+    if (currentWeight < birthWeight * 0.5 && birthWeight > 0) {
+      warnings.push("WARNING: Current weight is >50% below birth weight. Please verify data entry.");
+    }
+    if (currentWeight > birthWeight * 2 && dayOfLife < 14 && birthWeight > 0) {
+      warnings.push("WARNING: Current weight has doubled within 14 days. Please verify data entry.");
+    }
+    
+    const pma = gestationalAge + Math.floor(dayOfLife / 7);
+    if (pma > 44) {
+      warnings.push(`NOTICE: Post-Menstrual Age (PMA) is ${pma} weeks. Neonatal protocols may severely under-dose older infants.`);
+    }
+    if (dayOfLife > 28) {
+      warnings.push("NOTICE: Chronological age > 28 days. Patient has technically exceeded the neonatal period.");
+    }
+    if (dayOfLife < 0) {
+      warnings.push("CRITICAL: Day of Life cannot be negative.");
+    }
+    if (isAsphyxia && dayOfLife > 5) {
+      warnings.push("WARNING: Asphyxia fluid restriction (-20%) is typically for the acute oliguric phase (first few days). Please ensure the infant is not in the polyuric recovery phase to avoid severe dehydration.");
+    }
+
+    setInputWarnings(warnings);
+
+    // 2. Run Engine if data is relatively sane (prevent NaN cascades)
+    try {
+      // Hard block calculation if weight is completely impossible (> 15kg or < 0.2kg for a neonate)
+      if (currentWeight >= 0.2 && currentWeight <= 15 && birthWeight > 0 && dayOfLife >= 0 && gestationalAge > 0) {
+        const result = calculateNICUDosing({
+          birth_weight_kg: birthWeight,
+          current_weight_kg: currentWeight,
+          gestational_age_weeks: gestationalAge,
+          day_of_life: dayOfLife,
+          is_asphyxia: isAsphyxia,
+          is_phototherapy: isPhototherapy,
+          is_radiant_warmer: isRadiantWarmer,
+          base_excess: undefined,
+          drug_name: drugName
+        });
+        setOutput(result);
+      } else {
+        setOutput(null);
+      }
+    } catch (e) {
+      console.error(e);
+      setOutput(null);
+    }
+  }, [birthWeight, currentWeight, gestationalAge, dayOfLife, isAsphyxia, isPhototherapy, isRadiantWarmer, drugName]);
+
+  const hourlyRate = output?.fluid_volume_ml_per_day ? (output.fluid_volume_ml_per_day / 24).toFixed(1) : '0';
+
+  // Helper to colorize warnings
+  const getWarningStyle = (text: string) => {
+    if (text.includes("CRITICAL:")) return "bg-red-50 border-red-200 text-red-800";
+    if (text.includes("WARNING:")) return "bg-amber-50 border-amber-200 text-amber-800";
+    return "bg-blue-50 border-blue-200 text-blue-800";
+  };
+  const getWarningIcon = (text: string) => {
+    if (text.includes("CRITICAL:")) return <AlertTriangle className="w-4 h-4 text-red-600 mt-0.5" />;
+    if (text.includes("WARNING:")) return <AlertCircle className="w-4 h-4 text-amber-600 mt-0.5" />;
+    return <Info className="w-4 h-4 text-blue-600 mt-0.5" />;
+  };
+
+  return (
+    <div className="flex flex-col h-screen w-full bg-slate-50 font-sans text-slate-900 overflow-hidden">
+      {/* Sticky Top Header - Patient Summary */}
+      <header className="bg-sky-800 text-white p-3 shadow-md z-10 flex-shrink-0">
+        <h1 className="text-base font-bold">NICU Dosing Engine</h1>
+        <div className="flex gap-4 text-[11px] font-medium text-sky-100 mt-1 uppercase tracking-wider">
+          <span>Wt: {currentWeight} kg</span>
+          <span>DOL: {dayOfLife}</span>
+          <span>GA: {gestationalAge} wk</span>
+        </div>
+      </header>
+
+      {/* Scrollable Content Area */}
+      <main className="flex-1 overflow-y-auto pb-24 p-4 md:p-8 flex flex-col gap-6">
+        
+        {/* Vitals Tab */}
+        <div className={activeTab === 'vitals' ? 'block' : 'hidden'}>
+          {inputWarnings.length > 0 && (
+            <div className="flex flex-col gap-3 mb-6">
+              {inputWarnings.map((warn, i) => (
+                <div key={i} className={`border rounded-lg p-3 flex items-start gap-3 shadow-sm ${getWarningStyle(warn)}`}>
+                  {getWarningIcon(warn)}
+                  <span className="text-sm font-medium">{warn}</span>
+                </div>
+              ))}
+            </div>
+          )}
+          
+          <h2 className="text-xs font-bold text-sky-800 uppercase tracking-wider mb-4 border-b border-sky-100 pb-2">Primary Parameters</h2>
+          <div className="bg-white rounded-xl shadow-sm border border-slate-200 p-4 grid grid-cols-2 gap-6">
+            <div className="flex flex-col gap-2">
+              <label className="text-xs font-bold text-slate-600 uppercase">Birth Wt (kg)</label>
+              <input 
+                type="number"
+                step="0.1"
+                min="0"
+                inputMode="decimal"
+                value={birthWeightStr} 
+                onChange={(e) => setBirthWeightStr(e.target.value)}
+                className="w-full border-b-2 border-slate-300 bg-slate-50 px-3 py-3 text-lg font-bold text-center text-sky-900 focus:outline-none focus:border-sky-500 focus:bg-sky-50 transition-colors" 
+              />
+            </div>
+            <div className="flex flex-col gap-2">
+              <label className="text-xs font-bold text-slate-600 uppercase">Current Wt (kg)</label>
+              <input 
+                type="number"
+                step="0.1"
+                min="0"
+                inputMode="decimal"
+                value={currentWeightStr} 
+                onChange={(e) => setCurrentWeightStr(e.target.value)}
+                className="w-full border-b-2 border-sky-400 bg-sky-50 px-3 py-3 text-lg font-bold text-center text-sky-900 focus:outline-none focus:border-sky-600 focus:bg-sky-100 transition-colors" 
+              />
+            </div>
+            <div className="flex flex-col gap-2">
+              <label className="text-xs font-bold text-slate-600 uppercase">Gest. Age (wks)</label>
+              <input 
+                type="number"
+                inputMode="numeric"
+                value={gestationalAgeStr} 
+                onChange={(e) => setGestationalAgeStr(e.target.value)}
+                className="w-full border-b-2 border-slate-300 bg-slate-50 px-3 py-3 text-lg font-bold text-center text-sky-900 focus:outline-none focus:border-sky-500 focus:bg-sky-50 transition-colors" 
+              />
+            </div>
+            <div className="flex flex-col gap-2">
+              <label className="text-xs font-bold text-slate-600 uppercase">Day of Life</label>
+              <input 
+                type="number"
+                inputMode="numeric"
+                value={dayOfLifeStr} 
+                onChange={(e) => setDayOfLifeStr(e.target.value)}
+                className="w-full border-b-2 border-slate-300 bg-slate-50 px-3 py-3 text-lg font-bold text-center text-sky-900 focus:outline-none focus:border-sky-500 focus:bg-sky-50 transition-colors" 
+              />
+            </div>
+          </div>
+        </div>
+
+        {/* Fluids Tab */}
+        <div className={activeTab === 'fluids' ? 'block' : 'hidden'}>
+          <div className="grid grid-cols-2 gap-4 mb-6">
+            <div className="bg-sky-50 p-4 rounded-xl border-l-4 border-sky-500 shadow-sm flex flex-col justify-center">
+              <span className="text-[10px] uppercase font-bold text-sky-700 mb-1">Total Daily Fluid</span>
+              <div className="text-2xl font-black text-slate-800">
+                {output?.fluid_volume_ml_per_day || 0} <small className="text-sm font-normal text-slate-500">ml/day</small>
+              </div>
+              <div className="text-[10px] font-bold text-sky-600 mt-1 uppercase">
+                {output?.fluid_volume_ml_per_day && Math.max(birthWeight, currentWeight) > 0 ? (output.fluid_volume_ml_per_day / Math.max(birthWeight, currentWeight)).toFixed(1) : 0} ml/kg/day
+              </div>
+            </div>
+            <div className="bg-emerald-50 p-4 rounded-xl border-l-4 border-emerald-500 shadow-sm flex flex-col justify-center">
+              <span className="text-[10px] uppercase font-bold text-emerald-700 mb-1">Hourly Rate</span>
+              <div className="text-2xl font-black text-slate-800">
+                {hourlyRate} <small className="text-sm font-normal text-slate-500">ml/hr</small>
+              </div>
+            </div>
+          </div>
+          
+          <div className="bg-white p-4 rounded-xl shadow-sm border border-slate-200 mb-6">
+             <span className="text-[10px] uppercase font-bold text-slate-500 mb-1 block">Fluid Type Suggestion</span>
+             <div className="text-sm font-medium text-slate-800">{output?.fluid_type || 'N/A'}</div>
+          </div>
+
+          <h2 className="text-xs font-bold text-sky-800 uppercase tracking-wider mb-4 border-b border-sky-100 pb-2">Clinical Modifiers</h2>
+          <div className="flex flex-col gap-3">
+            <label className={`flex items-center justify-between p-4 border rounded-xl cursor-pointer transition-all shadow-sm ${isAsphyxia ? 'bg-sky-50 border-sky-400' : 'bg-white border-slate-200 hover:bg-slate-50'}`}>
+              <div className="flex flex-col">
+                <span className="text-sm font-bold text-slate-800">Severe Asphyxia</span>
+                <span className="text-[10px] text-slate-500 uppercase">Reduces fluids by 20%</span>
+              </div>
+              <input type="checkbox" checked={isAsphyxia} onChange={(e) => setIsAsphyxia(e.target.checked)} className="w-6 h-6 accent-sky-600 cursor-pointer" />
+            </label>
+            <label className={`flex items-center justify-between p-4 border rounded-xl cursor-pointer transition-all shadow-sm ${isPhototherapy ? 'bg-sky-50 border-sky-400' : 'bg-white border-slate-200 hover:bg-slate-50'}`}>
+              <div className="flex flex-col">
+                <span className="text-sm font-bold text-slate-800">Phototherapy</span>
+                <span className="text-[10px] text-slate-500 uppercase">Increases fluids by 10%</span>
+              </div>
+              <input type="checkbox" checked={isPhototherapy} onChange={(e) => setIsPhototherapy(e.target.checked)} className="w-6 h-6 accent-sky-600 cursor-pointer" />
+            </label>
+            <label className={`flex items-center justify-between p-4 border rounded-xl cursor-pointer transition-all shadow-sm ${isRadiantWarmer ? 'bg-sky-50 border-sky-400' : 'bg-white border-slate-200 hover:bg-slate-50'}`}>
+              <div className="flex flex-col">
+                <span className="text-sm font-bold text-slate-800">Radiant Warmer</span>
+                <span className="text-[10px] text-slate-500 uppercase">Increases fluids by 20%</span>
+              </div>
+              <input type="checkbox" checked={isRadiantWarmer} onChange={(e) => setIsRadiantWarmer(e.target.checked)} className="w-6 h-6 accent-sky-600 cursor-pointer" />
+            </label>
+          </div>
+        </div>
+
+        {/* Drugs Tab */}
+        <div className={activeTab === 'drugs' ? 'flex flex-col gap-6' : 'hidden'}>
+          <div className="bg-white p-4 rounded-xl shadow-sm border border-slate-200 sticky top-0 z-10">
+            <h2 className="text-xs font-bold text-sky-800 uppercase tracking-wider mb-3">Search Drug</h2>
+            <DrugSearchBox value={drugName} onChange={setDrugName} registry={DRUG_REGISTRY} />
+          </div>
+
+          {output?.warnings && output.warnings.length > 0 && (
+            <div className="flex flex-col gap-3">
+              {output.warnings.map((warn, i) => (
+                <div key={i} className={`border rounded-xl p-4 flex items-start gap-3 shadow-sm ${getWarningStyle(warn)}`}>
+                  {getWarningIcon(warn)}
+                  <span className="text-sm font-medium leading-snug">{warn}</span>
+                </div>
+              ))}
+            </div>
+          )}
+
+          {output?.drug_dose ? (
+            <div className="bg-white border border-slate-200 rounded-2xl p-5 shadow-md">
+              <div className="flex justify-between items-baseline mb-4 border-b border-slate-100 pb-3">
+                <h3 className="text-base font-bold text-slate-800 capitalize flex items-center gap-2">
+                  <Activity className="w-5 h-5 text-sky-600" />
+                  {DRUG_REGISTRY.find(d => d.id === drugName)?.name || drugName}
+                </h3>
+                <span className="px-2 py-1 bg-sky-100 text-sky-800 text-[10px] font-bold rounded uppercase">
+                  IV {output.drug_interval || 'PRN'}
+                </span>
+              </div>
+              
+              <div className="text-center py-6 bg-slate-50 rounded-xl border border-dashed border-slate-300 mb-6">
+                <div className="text-5xl font-black text-sky-900 tracking-tight">
+                  {output.drug_dose.split(' ')[0]} <span className="text-2xl font-bold text-sky-700">{output.drug_dose.split(' ').slice(1).join(' ')}</span>
+                </div>
+                <div className="text-[10px] font-bold text-slate-400 mt-3 uppercase tracking-widest">
+                  Calculated Total Dose
+                </div>
+              </div>
+              
+              {output.drug_base_concentration && (
+                <div className="space-y-4">
+                  <div className="flex justify-between items-center text-sm border-b border-slate-100 pb-2">
+                    <span className="text-slate-500 font-medium">Base Concentration</span>
+                    <span className="font-mono font-bold text-slate-800">{output.drug_base_concentration}</span>
+                  </div>
+                  {output.drug_volume_to_draw && (
+                    <div className="flex justify-between items-center text-sm">
+                      <span className="text-slate-500 font-medium">Volume to Draw</span>
+                      <span className="font-mono font-bold text-sky-700 text-lg">
+                        {output.drug_volume_to_draw}
+                      </span>
+                    </div>
+                  )}
+                </div>
+              )}
+
+              {output.preparation_steps && (
+                <div className="mt-6 bg-amber-50 border border-amber-200 rounded-xl p-4">
+                  <div className="flex items-center gap-2 mb-2">
+                    <FileText className="w-4 h-4 text-amber-600" />
+                    <span className="text-[10px] font-bold uppercase text-amber-800">Preparation & Safety</span>
+                  </div>
+                  <div className="text-sm text-slate-700 leading-relaxed font-medium">
+                    {output.preparation_steps}
+                  </div>
+                </div>
+              )}
+            </div>
+          ) : (
+            <div className="flex flex-col items-center justify-center py-12 px-4 text-center">
+               <div className="w-16 h-16 bg-slate-100 rounded-full flex items-center justify-center mb-4">
+                 <Syringe className="w-8 h-8 text-slate-300" />
+               </div>
+               <h3 className="text-slate-500 font-medium">Select a drug to calculate dose</h3>
+               <p className="text-xs text-slate-400 mt-2 max-w-[250px]">Search from the registry above. The dose will automatically adjust to the patient's current weight.</p>
+            </div>
+          )}
+        </div>
+
+      </main>
+
+      {/* Sticky Bottom Tab Bar */}
+      <nav className="bg-white border-t border-slate-200 fixed bottom-0 w-full flex justify-around p-2 pb-safe shadow-[0_-10px_40px_rgba(0,0,0,0.08)] z-50">
+        <button 
+          onClick={() => setActiveTab('vitals')}
+          className={`flex flex-col items-center gap-1 p-2 w-24 rounded-xl transition-all ${activeTab === 'vitals' ? 'text-sky-700 bg-sky-50' : 'text-slate-400 hover:bg-slate-50'}`}
+        >
+          <Baby className={`w-6 h-6 ${activeTab === 'vitals' ? 'fill-sky-100' : ''}`} />
+          <span className="text-[10px] font-bold uppercase tracking-wider">Vitals</span>
+        </button>
+        <button 
+          onClick={() => setActiveTab('fluids')}
+          className={`flex flex-col items-center gap-1 p-2 w-24 rounded-xl transition-all ${activeTab === 'fluids' ? 'text-emerald-700 bg-emerald-50' : 'text-slate-400 hover:bg-slate-50'}`}
+        >
+          <Droplets className={`w-6 h-6 ${activeTab === 'fluids' ? 'fill-emerald-100' : ''}`} />
+          <span className="text-[10px] font-bold uppercase tracking-wider">Fluids</span>
+        </button>
+        <button 
+          onClick={() => setActiveTab('drugs')}
+          className={`flex flex-col items-center gap-1 p-2 w-24 rounded-xl transition-all ${activeTab === 'drugs' ? 'text-indigo-700 bg-indigo-50' : 'text-slate-400 hover:bg-slate-50'}`}
+        >
+          <Syringe className={`w-6 h-6 ${activeTab === 'drugs' ? 'fill-indigo-100' : ''}`} />
+          <span className="text-[10px] font-bold uppercase tracking-wider">Drugs</span>
+        </button>
+      </nav>
+    </div>
+  );
+}
+
+```
+
+## index.html
+```html
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>My Google AI Studio App</title>
+    <meta name="description" content="An application built with Google AI Studio." />
+    <meta property="og:title" content="My Google AI Studio App" />
+    <meta property="og:description" content="An application built with Google AI Studio." />
+    <meta property="og:type" content="website" />
+    <meta name="twitter:card" content="summary_large_image" />
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
+</html>
+
+
+```
+
